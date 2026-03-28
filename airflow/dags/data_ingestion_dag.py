@@ -7,12 +7,13 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.amazon.aws.transfers.local_to_s3 import LocalFilesystemToS3Operator
 from airflow.models import Variable
+from silver_transform import transform_bronze_to_silver
 
 from ingestion_script import main as run_ingestion
 from dag_utils import with_telegram_alert
 
 # Must match bucket created by minio-init (MINIO_DEFAULT_BUCKET in airflow/.env)
-MINIO_BUCKET = Variable.get("minio_bucket")
+MINIO_BUCKET = Variable.get("minio_bucket", default_var="datalake")
 LOCAL_DIR    = "/tmp/airflow_data"
 
 default_args = {
@@ -78,4 +79,18 @@ with DAG(
         python_callable=cleanup_local_file,
     )
 
-    task_process_local >> task_upload_minio >> task_cleanup
+    def run_silver_layer(**kwargs):
+        execution_date = kwargs["ds"]
+        transform_bronze_to_silver(
+            execution_date=execution_date,
+            bucket_name=MINIO_BUCKET,
+        )
+
+    task_silver_transform = PythonOperator(
+        task_id='transform_bronze_to_silver',
+        python_callable=run_silver_layer,
+    )
+
+    # ĐỊNH NGHĨA LUỒNG MỚI
+    # Sau khi upload lên Bronze xong thì mới chạy Transform sang Silver
+    task_process_local >> task_upload_minio >> task_cleanup >> task_silver_transform
