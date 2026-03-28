@@ -1,96 +1,81 @@
-import requests
 import logging
+import os
+import re
+from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.amazon.aws.transfers.local_to_s3 import LocalFilesystemToS3Operator
 from airflow.models import Variable
-from datetime import datetime, timedelta
 
 from ingestion_script import main as run_ingestion
+from dag_utils import with_telegram_alert
 
-TELEGRAM_BOT_TOKEN = Variable.get("telegram_bot_token")
-TELEGRAM_CHAT_ID   = Variable.get("telegram_chat_id")
-
-
-def send_telegram_message(dag_id, task_id, execution_date, exception):
-    logging.info("🔔 send_telegram_message ĐƯỢC GỌI!")
-
-    message = (
-        "🚨 *CẢNH BÁO LỖI DATA PIPELINE* 🚨\n"
-        f"- *DAG:* `{dag_id}`\n"
-        f"- *Task:* `{task_id}`\n"
-        f"- *Thời gian chạy:* {execution_date}\n"
-        f"- *Chi tiết lỗi:* `{str(exception)}`"
-    )
-
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                'chat_id': TELEGRAM_CHAT_ID,
-                'text': message,
-                'parse_mode': 'Markdown',
-            },
-            timeout=10
-        )
-        response.raise_for_status()
-        logging.info("✅ Gửi Telegram thành công!")
-    except Exception as e:
-        logging.error(f"❌ Lỗi gửi Telegram: {e}")
-
+# Must match bucket created by minio-init (MINIO_DEFAULT_BUCKET in airflow/.env)
+MINIO_BUCKET = Variable.get("minio_bucket")
+LOCAL_DIR    = "/tmp/airflow_data"
 
 default_args = {
     'owner': 'data_engineer_team',
-    'depends_on_past': False,
-    'retries': 2,
-    'retry_delay': timedelta(minutes=3),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=2),
 }
 
 
-def execute_pipeline(**kwargs):
-    try:
-        logical_date   = kwargs['logical_date']
-        execution_date = logical_date.strftime('%Y-%m-%d')
-        run_ingestion(execution_date=execution_date)
-    except Exception as e:
-        send_telegram_message(
-            dag_id=kwargs['dag'].dag_id,
-            task_id=kwargs['task'].task_id,
-            execution_date=kwargs['logical_date'].strftime('%Y-%m-%d %H:%M:%S'),
-            exception=e,
-        )
-        raise
+def _safe_run_id_fragment(run_id: str) -> str:
+    """Filesystem-safe fragment from dag_run.run_id (manual triggers reuse same ds)."""
+    return re.sub(r"[^\w\-.]", "_", run_id)
 
 
-def intentional_fail(**kwargs):
-    try:
-        raise ValueError("Lỗi 500: Database sập nguồn rồi sếp ơi?!!!")
-    except Exception as e:
-        send_telegram_message(
-            dag_id=kwargs['dag'].dag_id,
-            task_id=kwargs['task'].task_id,
-            execution_date=kwargs['logical_date'].strftime('%Y-%m-%d %H:%M:%S'),
-            exception=e,
-        )
-        raise  # ← bắt buộc để Airflow vẫn mark Failed
+@with_telegram_alert                               # ✅ Tự động alert khi fail
+def execute_local_pipeline(**kwargs):
+    logical_date = kwargs["logical_date"]
+    execution_date = logical_date.strftime("%Y-%m-%d")
+    dag_run = kwargs["dag_run"]
+    run_part = _safe_run_id_fragment(dag_run.run_id)
+
+    os.makedirs(LOCAL_DIR, exist_ok=True)
+    local_filepath = f"{LOCAL_DIR}/posts_{execution_date}_{run_part}.parquet"
+    logging.info("Local extract path for this run: %s", local_filepath)
+    run_ingestion(execution_date=execution_date, file_path=local_filepath)
+    return local_filepath
+
+
+@with_telegram_alert                               # ✅ Tự động alert khi fail
+def cleanup_local_file(**kwargs):
+    filepath = kwargs['ti'].xcom_pull(task_ids='extract_transform_local')
+    if filepath and os.path.exists(filepath):
+        os.remove(filepath)
+        logging.info(f"✅ Đã xóa file: {filepath}")
 
 
 with DAG(
-    dag_id='daily_api_to_parquet_ingestion',
+    dag_id='ingestion_api_to_minio',
     default_args=default_args,
     schedule='0 2 * * *',
     start_date=datetime(2025, 1, 1),
     catchup=False,
-    tags=['ingestion', 'alerting'],
+    tags=['local_data_lake', 'minio'],
 ) as dag:
 
-    ingestion_task = PythonOperator(
-        task_id='extract_transform_load_api_data',
-        python_callable=execute_pipeline,
+    task_process_local = PythonOperator(
+        task_id='extract_transform_local',
+        python_callable=execute_local_pipeline,
     )
 
-    test_fail_task = PythonOperator(
-        task_id='test_fail_task',
-        python_callable=intentional_fail,
+    task_upload_minio = LocalFilesystemToS3Operator(
+        task_id='upload_to_minio',
+        filename="{{ ti.xcom_pull(task_ids='extract_transform_local') }}",
+        dest_key="bronze/api_posts/dt={{ ds }}/{{ dag_run.run_id }}/data.parquet",
+        dest_bucket=MINIO_BUCKET,
+        aws_conn_id='minio_conn',
+        replace=True,
     )
 
-    ingestion_task >> test_fail_task
+    # ✅ Dùng PythonOperator thay BashOperator để có thể alert
+    task_cleanup = PythonOperator(
+        task_id='cleanup_local',
+        python_callable=cleanup_local_file,
+    )
+
+    task_process_local >> task_upload_minio >> task_cleanup
