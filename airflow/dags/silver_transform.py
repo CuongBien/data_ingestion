@@ -4,12 +4,6 @@ from urllib.parse import urlparse
 import duckdb
 from airflow.hooks.base import BaseHook
 
-try:
-    from airflow.sdk import Variable
-except ImportError:
-    from airflow.models import Variable
-
-
 def _duckdb_s3_host_port(endpoint_url: str) -> tuple[str, bool]:
     """Parse Airflow AWS extra endpoint_url into host:port and ssl flag for DuckDB httpfs."""
     parsed = urlparse(endpoint_url.strip())
@@ -30,16 +24,14 @@ def _sql_literal(value: str) -> str:
 
 def transform_bronze_to_silver(
     execution_date: str,
-    minio_conn_id: str = "minio_conn",
-    bucket_name: str | None = None,
+    bucket_name: str,
+    output_run_id_fragment: str,
+    minio_conn_id: str,
 ) -> None:
     """
     Read Bronze Parquet from MinIO via DuckDB httpfs, aggregate, write Silver Parquet.
     Credentials and endpoint come from Airflow Connection (same as aws_conn_id=minio_conn).
     """
-    if bucket_name is None:
-        bucket_name = Variable.get("minio_bucket", default_var="datalake")
-
     conn_af = BaseHook.get_connection(minio_conn_id)
     access_key = conn_af.login
     secret_key = conn_af.password
@@ -64,7 +56,8 @@ def transform_bronze_to_silver(
         f"s3://{bucket_name}/bronze/api_posts/dt={execution_date}/*/data.parquet"
     )
     silver_path = (
-        f"s3://{bucket_name}/silver/user_stats/dt={execution_date}/stats.parquet"
+        f"s3://{bucket_name}/silver/user_stats/dt={execution_date}/"
+        f"{output_run_id_fragment}/stats.parquet"
     )
 
     logging.info("Đang đọc dữ liệu từ: %s", bronze_glob)

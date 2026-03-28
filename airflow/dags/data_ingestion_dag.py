@@ -1,19 +1,17 @@
 import logging
 import os
-import re
 from datetime import datetime, timedelta
+
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.amazon.aws.transfers.local_to_s3 import LocalFilesystemToS3Operator
-from airflow.models import Variable
-from silver_transform import transform_bronze_to_silver
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.sdk import Variable
 
 from ingestion_script import main as run_ingestion
-from dag_utils import with_telegram_alert
+from dag_utils import safe_run_id_path_fragment, with_telegram_alert
 
-# Must match bucket created by minio-init (MINIO_DEFAULT_BUCKET in airflow/.env)
-MINIO_BUCKET = Variable.get("minio_bucket", default_var="datalake")
+MINIO_BUCKET = Variable.get("minio_bucket")
 LOCAL_DIR    = "/tmp/airflow_data"
 
 default_args = {
@@ -23,31 +21,27 @@ default_args = {
 }
 
 
-def _safe_run_id_fragment(run_id: str) -> str:
-    """Filesystem-safe fragment from dag_run.run_id (manual triggers reuse same ds)."""
-    return re.sub(r"[^\w\-.]", "_", run_id)
-
-
-@with_telegram_alert                               # ✅ Tự động alert khi fail
+@with_telegram_alert
 def execute_local_pipeline(**kwargs):
-    logical_date = kwargs["logical_date"]
+    logical_date   = kwargs["logical_date"]
     execution_date = logical_date.strftime("%Y-%m-%d")
-    dag_run = kwargs["dag_run"]
-    run_part = _safe_run_id_fragment(dag_run.run_id)
+    dag_run        = kwargs["dag_run"]
+    run_part       = safe_run_id_path_fragment(dag_run.run_id)
 
     os.makedirs(LOCAL_DIR, exist_ok=True)
     local_filepath = f"{LOCAL_DIR}/posts_{execution_date}_{run_part}.parquet"
-    logging.info("Local extract path for this run: %s", local_filepath)
+    logging.info("Local extract path: %s", local_filepath)
+
     run_ingestion(execution_date=execution_date, file_path=local_filepath)
     return local_filepath
 
 
-@with_telegram_alert                               # ✅ Tự động alert khi fail
+@with_telegram_alert
 def cleanup_local_file(**kwargs):
     filepath = kwargs['ti'].xcom_pull(task_ids='extract_transform_local')
     if filepath and os.path.exists(filepath):
         os.remove(filepath)
-        logging.info(f"✅ Đã xóa file: {filepath}")
+        logging.info("✅ Đã xóa file: %s", filepath)
 
 
 with DAG(
@@ -56,7 +50,7 @@ with DAG(
     schedule='0 2 * * *',
     start_date=datetime(2025, 1, 1),
     catchup=False,
-    tags=['local_data_lake', 'minio'],
+    tags=['bronze', 'ingestion'],
 ) as dag:
 
     task_process_local = PythonOperator(
@@ -73,24 +67,17 @@ with DAG(
         replace=True,
     )
 
-    # ✅ Dùng PythonOperator thay BashOperator để có thể alert
     task_cleanup = PythonOperator(
         task_id='cleanup_local',
         python_callable=cleanup_local_file,
     )
 
-    def run_silver_layer(**kwargs):
-        execution_date = kwargs["ds"]
-        transform_bronze_to_silver(
-            execution_date=execution_date,
-            bucket_name=MINIO_BUCKET,
-        )
-
-    task_silver_transform = PythonOperator(
-        task_id='transform_bronze_to_silver',
-        python_callable=run_silver_layer,
+    # Trigger DAG 2 sau khi Bronze xong, truyền ds sang
+    task_trigger_transform = TriggerDagRunOperator(
+        task_id='trigger_transform_dag',
+        trigger_dag_id='transform_bronze_to_silver',
+        conf={"execution_date": "{{ ds }}"},
+        wait_for_completion=False,
     )
 
-    # ĐỊNH NGHĨA LUỒNG MỚI
-    # Sau khi upload lên Bronze xong thì mới chạy Transform sang Silver
-    task_process_local >> task_upload_minio >> task_cleanup >> task_silver_transform
+    task_process_local >> task_upload_minio >> task_cleanup >> task_trigger_transform
