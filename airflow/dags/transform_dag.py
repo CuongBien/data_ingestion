@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timedelta
 
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Variable
@@ -37,6 +38,8 @@ def run_silver_layer(**kwargs):
         output_run_id_fragment=run_part,
         minio_conn_id="minio_conn",
     )
+    # Return so the next TriggerDagRunOperator can pass this fragment to the gold layer.
+    return run_part
 
 
 with DAG(
@@ -52,3 +55,15 @@ with DAG(
         task_id='transform_bronze_to_silver',
         python_callable=run_silver_layer,
     )
+
+    task_trigger_gold = TriggerDagRunOperator(
+        task_id='trigger_gold_dag',
+        trigger_dag_id='gold_layer_to_postgres',
+        conf={
+            "execution_date": "{{ ds }}",
+            "silver_run_fragment": "{{ ti.xcom_pull(task_ids='transform_bronze_to_silver') }}",
+        },
+        wait_for_completion=False,
+    )
+
+    task_silver_transform >> task_trigger_gold
