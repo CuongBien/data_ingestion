@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.amazon.aws.transfers.local_to_s3 import LocalFilesystemToS3Operator
-from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import Variable
 
 from ingestion_script import main as run_ingestion
@@ -72,12 +71,4 @@ with DAG(
         python_callable=cleanup_local_file,
     )
 
-    # Trigger DAG 2 sau khi Bronze xong, truyền ds sang
-    task_trigger_transform = TriggerDagRunOperator(
-        task_id='trigger_transform_dag',
-        trigger_dag_id='transform_bronze_to_silver',
-        conf={"execution_date": "{{ ds }}"},
-        wait_for_completion=False,
-    )
-
-    task_process_local >> task_upload_minio >> task_cleanup >> task_trigger_transform
+    task_process_local >> task_upload_minio >> task_cleanup

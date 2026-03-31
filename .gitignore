@@ -1,0 +1,55 @@
+# Secrets — never commit
+.env
+**/.env
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+
+# Test / typecheck
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Airflow (local / Docker bind mounts)
+airflow/logs/
+airflow/**/logs/
+
+# Pipeline output (keep empty dir marker if needed)
+airflow/data/*
+!airflow/data/.gitkeep
+
+# Local data artifacts
+*.parquet
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

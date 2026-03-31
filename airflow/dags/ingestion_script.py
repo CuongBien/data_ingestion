@@ -57,67 +57,29 @@ def extract_data(url: str) -> list:
         raise
 
 def transform_data(raw_data: list) -> pd.DataFrame:
-    """Xử lý sơ bộ, làm sạch và ép kiểu dữ liệu."""
-    logging.info("Bắt đầu xử lý dữ liệu (Transform)...")
+    """E-only mode: only normalize API payload to raw Bronze dataframe."""
+    logging.info("E-only mode: skip business transform, keep raw rows.")
 
     if len(raw_data) == 0:
-        logging.warning("Transform: input [] — trả về DataFrame rỗng đúng schema.")
+        logging.warning("E-only: input [] — return empty dataframe with Bronze schema.")
         return pd.DataFrame(columns=POST_SCHEMA_COLUMNS)
 
     dict_rows: list[dict] = [x for x in raw_data if isinstance(x, dict)]
     skipped: int = len(raw_data) - len(dict_rows)
     if skipped > 0:
-        logging.warning(
-            "Transform: bỏ qua %d phần tử không phải object JSON.",
-            skipped,
-        )
+        logging.warning("E-only: skipped %d non-object elements from API payload.", skipped)
     if len(dict_rows) == 0:
-        logging.warning("Transform: không còn object hợp lệ sau lọc — schema rỗng.")
+        logging.warning("E-only: no valid object rows after filtering.")
         return pd.DataFrame(columns=POST_SCHEMA_COLUMNS)
 
     df = pd.DataFrame(dict_rows)
     for col in POST_SCHEMA_COLUMNS:
         if col not in df.columns:
             df[col] = pd.NA
-            logging.info("Transform: thêm cột thiếu %s (NA).", col)
+            logging.info("E-only: add missing column %s (NA).", col)
 
     df = df[POST_SCHEMA_COLUMNS]
-
-    df = df.dropna(subset=["title"])
-    df["body"] = df["body"].fillna("No content available")
-
-    if df.empty:
-        logging.warning(
-            "Transform: không còn dòng sau dropna(title) — trả về schema rỗng."
-        )
-        return pd.DataFrame(columns=POST_SCHEMA_COLUMNS)
-
-    df["id"] = pd.to_numeric(df["id"], errors="coerce")
-    df["userId"] = pd.to_numeric(df["userId"], errors="coerce")
-    before_rows: int = len(df)
-    df = df.dropna(subset=["id", "userId"])
-    dropped_numeric: int = before_rows - len(df)
-    if dropped_numeric > 0:
-        logging.warning(
-            "Transform: loại %d dòng id/userId không ép được số.",
-            dropped_numeric,
-        )
-
-    if df.empty:
-        logging.warning(
-            "Transform: không còn dòng sau lọc id/userId — schema rỗng."
-        )
-        return pd.DataFrame(columns=POST_SCHEMA_COLUMNS)
-
-    try:
-        df["id"] = df["id"].astype(int)
-        df["userId"] = df["userId"].astype(int)
-        df["title"] = df["title"].astype(str)
-    except (ValueError, TypeError) as e:
-        logging.error("Lỗi định dạng khi ép kiểu cuối: %s", e)
-        raise ValueError("Invalid data types after cleaning; see logs.") from e
-
-    logging.info("Hoàn thành Transform. shape=%s", df.shape)
+    logging.info("E-only: raw dataframe prepared. shape=%s", df.shape)
     return df
 
 def load_data(df: pd.DataFrame, file_path: str) -> None:

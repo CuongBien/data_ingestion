@@ -3,7 +3,7 @@ import functools
 import re
 from datetime import datetime
 
-from telegram_alert import send_telegram_message
+from utils.telegram_alert import send_telegram_message
 
 
 def safe_run_id_path_fragment(run_id: str) -> str:

@@ -1,15 +1,8 @@
-# Sử dụng Python image nhẹ gọn
-FROM python:3.10-slim
+FROM apache/airflow:3.1.8        
 
-# Thiết lập thư mục làm việc trong container
-WORKDIR /app
+USER root
+RUN apt-get update && apt-get install -y git && apt-get clean
 
-# Copy requirements và cài đặt
+USER airflow
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy toàn bộ code vào container
-COPY ingestion_script.py .
-
-# Lệnh mặc định khi container chạy
-CMD ["python", "ingestion_script.py"]

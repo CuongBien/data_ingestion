@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: stg_posts
+    columns:
+      - name: id
+        tests:
+          - unique   # ID không được trùng
+          - not_null # ID không được trống
+
+  - name: user_stats
+    columns:
+      - name: user_id
+        tests:
+          - not_null
